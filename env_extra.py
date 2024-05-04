@@ -1,5 +1,5 @@
 from os.path import isfile
-Import('env')
+Import('env')  # type: ignore
 
 assert isfile('.env')
 try:
@@ -8,7 +8,7 @@ try:
     envs = []
     for line in lines:
         envs.append("-D{}".format(line.strip()))
-    env.Append(BUILD_FLAGS=envs)
+    env.Append(BUILD_FLAGS=envs)  # type: ignore
 except IOError:
     print("File .env not accessible or not exists",)
 finally:
