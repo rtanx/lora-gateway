@@ -7,7 +7,8 @@ try:
     lines = f.readlines()
     envs = []
     for line in lines:
-        envs.append("-D{}".format(line.strip()))
+        print("'-D {}'".format(line.strip()))
+        envs.append("'-D {}'".format(line.strip()))
     env.Append(BUILD_FLAGS=envs)  # type: ignore
 except IOError:
     print("File .env not accessible or not exists",)
