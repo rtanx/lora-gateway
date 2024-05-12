@@ -3,36 +3,25 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
-// Firebase data object
-FirebaseData Fdo;
-FirebaseAuth Fauth;
-FirebaseConfig Fcfg;
+FirebaseData Fdo;     // Firebase data object
+FirebaseAuth Fauth;   // Firebase authentication object
+FirebaseConfig Fcfg;  // Firebase configuration object
 
-// Variable to save user UID
-String uid;
+String uid;  // Variable to save user UID
 
-// Database main path (to be updated in setup with the user UID
-String dbPath;
-// Database child nodes
-String timePath = "/timestamp";
+String dbPath;  // Database main path (to be updated in setup with the user UID
 
-// Parent node (to be updated in every loop)
-String parentPath;
+String parentPath;  // Parent node (to be updated in every loop)
 
-int timestamp;
-
-const char* ntpServer = "pool.ntp.org";
-
-// Timer variables (send new reading every 3 minutes)
-unsigned long sendDataPrevMillis = 0ul;
-// unsigned long timerDelay = 3 * 60 * 1000;
-unsigned long timerDelay = 30 * 1000;
-
-bool signUpOK = false;
+const char* ntpServer = "pool.ntp.org";  //  time synchronizzation NTP server address
 
 bool runEvery(unsigned long interval) {
-    static unsigned long previousMillis = 0;
-    unsigned long currentMillis = millis();
+    static unsigned long previousMillis = 0;  // Stores the timestamp of the last call
+    unsigned long currentMillis = millis();   // Retrieves the current time
+
+    // Checks if the difference between the current time and the previous time
+    // is greater than or equal to the specified interval
+    // then, updates the previous time to the current time if true
     if (currentMillis - previousMillis >= interval) {
         previousMillis = currentMillis;
         return true;
@@ -53,7 +42,6 @@ void connectWifi() {
     Serial.println();
 }
 
-// Function to gets current epoch time
 unsigned long getTime() {
     time_t now;
     struct tm timeinfo;
@@ -66,23 +54,23 @@ unsigned long getTime() {
 
 void initFirebase() {
     Fcfg.api_key = FIREBASE_API_KEY;
-    String db_url = String("https://" FIREBASE_DB_ENDPOINT "/");
+    String db_url = String("https://" FIREBASE_DB_ENDPOINT "/");  // construct firebase db endpoint to full url form
     Fcfg.database_url = db_url;
 
     Fauth.user.email = FIREBASE_USER_EMAIL;
     Fauth.user.password = FIREBASE_USER_PWD;
 
-    Firebase.reconnectNetwork(true);
-    Fdo.setResponseSize(4096);
+    Firebase.reconnectNetwork(true);  // let firebase reconnect to the network if network fail occured
+    Fdo.setResponseSize(4096);        // sets the response size for Firebase operations to 4096 bytes,  meaning that the buffer will be able to hold up to 4096 bytes of data when receiving responses from Firebase
 
-    // Assign the callback function for the long running token generation task
-    Fcfg.token_status_callback = tokenStatusCallback;
+    Fcfg.token_status_callback = tokenStatusCallback;  // Assign the callback function for the long running token generation task
 
-    // Assign the maximum retry of token generation
-    Fcfg.max_token_generation_retry = 5;
+    Fcfg.max_token_generation_retry = 5;  // Set maximum retry count for token generation
 
+    // Begin Firebase connection and authentication
     Firebase.begin(&Fcfg, &Fauth);
 
+    // Wait for user authentication and obtain UID
     Serial.println("Getting User UID");
     while ((Fauth.token.uid) == "") {
         Serial.print(".");
@@ -92,55 +80,56 @@ void initFirebase() {
     Serial.print("User UID: ");
     Serial.println(uid);
 
+    // Construct database path for user data
     dbPath = "/UsersData/";
     dbPath.concat(uid);
     dbPath.concat("/readings");
 }
 
 void logToFirebase(int fromNode, FirebaseJson* jsonData) {
-    // if (Firebase.ready() && (millis() - sendDataPrevMillis > timerDelay || sendDataPrevMillis == 0)) {
-    // sendDataPrevMillis = millis();
+    int timestamp;  // hold current timestamp
     String nodePath = "/node-";
-    nodePath.concat(String(fromNode));
-    timestamp = getTime();
+    nodePath.concat(String(fromNode));  // Construct node path
+    timestamp = getTime();              // Get current timestamp
     Serial.print("time: ");
     Serial.println(timestamp);
 
+    // Construct parent path
     parentPath = dbPath;
     parentPath.concat(nodePath);
     parentPath.concat("/");
     parentPath.concat(String(timestamp));
 
+    // Set JSON data to Firebase Realtime Database
     bool ok = Firebase.RTDB.setJSON(&Fdo, parentPath.c_str(), jsonData);
     if (!ok) {
+        // Print error message if setting JSON data fails
         Serial.printf("Set json error: %s\n", Fdo.errorReason().c_str());
         return;
     }
     Serial.println("===============");
     Serial.println("Set json: OK");
     Serial.println("===============");
-
-    // }
 }
 
 void initLoRa() {
-    // setup LoRa transceiver module
+    // Setup LoRa transceiver module pin configurations
     LoRa.setPins(LORA_CS_PIN, LORA_RST_PIN, LORA_IRQ_PIN);
 
-    // using 915E6 freq
     int conn_try = 1;
     int lora_begin_ok = 0;
     Serial.println("Initializing LoRa Receiver");
     while (!lora_begin_ok) {
-        lora_begin_ok = LoRa.begin(LORA_FREQ);
+        lora_begin_ok = LoRa.begin(LORA_FREQ);  // Set frequency to 915E6 Hz and initialize LoRa receiver
         Serial.print(".");
+        // Check if maximum attempts reached
         if (conn_try >= 15) {
             Serial.println();
             Serial.println("LoRa init failed. Check your connections.");
-            while (true);
+            while (true);  // Infinite loop to halt program execution if failed to establish LoRa conenction
         }
         conn_try++;
-        delay(500);
+        delay(500);  // Delay before next initialization attempt
     }
     Serial.println();
     Serial.println("LoRa Receiver Initializing OK!");
@@ -155,17 +144,17 @@ void initLoRa() {
 void receiveLoRa(int packet_size) {
     if (packet_size) {
         Serial.println("--------------------");
-        // print RSSI of packet
+        // Print the Received Signal Strength Indicator (RSSI) of the received packet
         Serial.print("Received packet with RSSI ");
         Serial.println(LoRa.packetRssi());
 
-        // received a packet
         String message = "";
-        // read packet
+        // Read packet data and append to the message string
         while (LoRa.available()) {
             message += (char)LoRa.read();
         }
 
+        // Parse the received message as JSON using the FirebaseJson library
         FirebaseJson Fjson;
         bool is_parsed = Fjson.setJsonData<String>(message);
         if (!is_parsed) {
@@ -177,6 +166,8 @@ void receiveLoRa(int packet_size) {
         FirebaseJsonData desJson;
         int node_id;
         Serial.println("--------------------");
+
+        // Extract and print each key-value pair from the JSON data
         Fjson.get(desJson, "node_id");
         checkAndPrintJSONKeyValuePair("node_id", &desJson);
         node_id = desJson.to<int>();
@@ -195,18 +186,19 @@ void receiveLoRa(int packet_size) {
         desJson.clear();
         Serial.println("--------------------");
 
-        // remove node_id from json object
-        Fjson.remove("node_id");
+        Fjson.remove("node_id");  // Remove node_id from the JSON object, not logged to RTDB, cause already defined as a data path
 
-        logToFirebase(node_id, &Fjson);
-        Fjson.clear();
+        logToFirebase(node_id, &Fjson);  // Log the parsed data to the Firebase Realtime Database
+        Fjson.clear();                   // Clear the JSON object to free memory
     }
 }
 
 inline void checkAndPrintJSONKeyValuePair(String key, FirebaseJsonData* result) {
-    if (result->success) {
-        Serial.print(key);
-        Serial.print(": ");
+    if (result->success) {   // Check if JSON value conversion was successful
+        Serial.print(key);   // Print the key of the key-value pair
+        Serial.print(": ");  // Print separator between key and value
+
+        // Check the type of JSON value and print the corresponding value
         if (result->typeNum == FirebaseJson::JSON_STRING)
             Serial.println(result->to<String>().c_str());
         else if (result->typeNum == FirebaseJson::JSON_INT)
@@ -232,23 +224,25 @@ inline void checkAndPrintJSONKeyValuePair(String key, FirebaseJsonData* result) 
 void setup() {
     // initialize Serial Monitor
     delay(3000);
-    Serial.flush();
+    Serial.flush();  // Flush any existing data in the serial buffer
     Serial.begin(115200);
     Serial.println("Initializing...");
-    delay(3000);
+    delay(3000);  // Additional delay for stability
+
+    // Configure time synchronization using NTP
     configTime(0, 0, ntpServer);
 
     Serial.println("================= Wifi =================");
-    connectWifi();
+    connectWifi();  // Establish Wi-Fi connection
 
     Serial.println("================= Firebase =================");
-    initFirebase();
+    initFirebase();  // Initialize Firebase integration
 
     Serial.println("================= LoRa Receiver =================");
-    initLoRa();
+    initLoRa();  // Set up LoRa receiver
 }
 
 void loop() {
-    int packet_size = LoRa.parsePacket();
-    receiveLoRa(packet_size);
+    int packet_size = LoRa.parsePacket();  // Check for incoming LoRa packet
+    receiveLoRa(packet_size);              // Process the received LoRa packet (if any)
 }
