@@ -1,11 +1,7 @@
 #include "main.h"
 
+#include <ArduinoJson.h>
 #include <time.h>
-
-// define the pins used by the transceiver module
-#define ss 5
-#define rst 14
-#define dio0 2
 
 // Firebase data object
 FirebaseData Fdo;
@@ -18,14 +14,12 @@ String uid;
 // Database main path (to be updated in setup with the user UID
 String dbPath;
 // Database child nodes
-String dummySensorPath = "/dummy";
 String timePath = "/timestamp";
 
 // Parent node (to be updated in every loop)
 String parentPath;
 
 int timestamp;
-FirebaseJson json;
 
 const char* ntpServer = "pool.ntp.org";
 
@@ -34,8 +28,17 @@ unsigned long sendDataPrevMillis = 0ul;
 // unsigned long timerDelay = 3 * 60 * 1000;
 unsigned long timerDelay = 30 * 1000;
 
-int count = 0;
 bool signUpOK = false;
+
+bool runEvery(unsigned long interval) {
+    static unsigned long previousMillis = 0;
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= interval) {
+        previousMillis = currentMillis;
+        return true;
+    }
+    return false;
+}
 
 void connectWifi() {
     WiFi.begin(WIFI_SSID, WIFI_PWD);
@@ -69,7 +72,7 @@ void initFirebase() {
     Fauth.user.email = FIREBASE_USER_EMAIL;
     Fauth.user.password = FIREBASE_USER_PWD;
 
-    Firebase.reconnectWiFi(true);
+    Firebase.reconnectNetwork(true);
     Fdo.setResponseSize(4096);
 
     // Assign the callback function for the long running token generation task
@@ -94,86 +97,158 @@ void initFirebase() {
     dbPath.concat("/readings");
 }
 
-void logToFirebase() {
-    if (Firebase.ready() && (millis() - sendDataPrevMillis > timerDelay || sendDataPrevMillis == 0)) {
-        sendDataPrevMillis = millis();
+void logToFirebase(int fromNode, FirebaseJson* jsonData) {
+    // if (Firebase.ready() && (millis() - sendDataPrevMillis > timerDelay || sendDataPrevMillis == 0)) {
+    // sendDataPrevMillis = millis();
+    String nodePath = "/node-";
+    nodePath.concat(String(fromNode));
+    timestamp = getTime();
+    Serial.print("time: ");
+    Serial.println(timestamp);
 
-        timestamp = getTime();
-        Serial.print("time: ");
-        Serial.println(timestamp);
+    parentPath = dbPath;
+    parentPath.concat(nodePath);
+    parentPath.concat("/");
+    parentPath.concat(String(timestamp));
 
-        parentPath = dbPath;
-        parentPath.concat("/");
-        parentPath.concat(String(timestamp));
+    bool ok = Firebase.RTDB.setJSON(&Fdo, parentPath.c_str(), jsonData);
+    if (!ok) {
+        Serial.printf("Set json error: %s\n", Fdo.errorReason().c_str());
+        return;
+    }
+    Serial.println("===============");
+    Serial.println("Set json: OK");
+    Serial.println("===============");
 
-        json.set(dummySensorPath.c_str(), String(count));
-        json.set(timePath.c_str(), String(timestamp));
+    // }
+}
 
-        bool ok = Firebase.RTDB.setJSON(&Fdo, parentPath.c_str(), &json);
-        if (!ok) {
-            Serial.printf("Set json error: %s\n", Fdo.errorReason().c_str());
+void initLoRa() {
+    // setup LoRa transceiver module
+    LoRa.setPins(LORA_CS_PIN, LORA_RST_PIN, LORA_IRQ_PIN);
+
+    // using 915E6 freq
+    int conn_try = 1;
+    int lora_begin_ok = 0;
+    Serial.println("Initializing LoRa Receiver");
+    while (!lora_begin_ok) {
+        lora_begin_ok = LoRa.begin(LORA_FREQ);
+        Serial.print(".");
+        if (conn_try >= 15) {
+            Serial.println();
+            Serial.println("LoRa init failed. Check your connections.");
+            while (true);
+        }
+        conn_try++;
+        delay(500);
+    }
+    Serial.println();
+    Serial.println("LoRa Receiver Initializing OK!");
+    Serial.println("Only receive messages from nodes");
+    Serial.println();
+    // Change sync word (0xF3) to match the receiver
+    // The sync word assures you don't get LoRa messages from other LoRa transceivers
+    // ranges from 0-0xFF
+    LoRa.setSyncWord(0xF3);
+}
+
+void receiveLoRa(int packet_size) {
+    if (packet_size) {
+        Serial.println("--------------------");
+        // print RSSI of packet
+        Serial.print("Received packet with RSSI ");
+        Serial.println(LoRa.packetRssi());
+
+        // received a packet
+        String message = "";
+        // read packet
+        while (LoRa.available()) {
+            message += (char)LoRa.read();
+        }
+
+        FirebaseJson Fjson;
+        bool is_parsed = Fjson.setJsonData<String>(message);
+        if (!is_parsed) {
+            Serial.print("JSON deserialization failed: ");
+            Serial.print("Position Error: ");
+            Serial.println(Fjson.errorPosition());
             return;
         }
-        Serial.println("===============");
-        Serial.println("Set json: OK");
-        Serial.printf("Dummy: %s\nTimestamp:%s\n", String(count), String(timestamp));
-        Serial.println("===============");
+        FirebaseJsonData desJson;
+        int node_id;
+        Serial.println("--------------------");
+        Fjson.get(desJson, "node_id");
+        checkAndPrintJSONKeyValuePair("node_id", &desJson);
+        node_id = desJson.to<int>();
+        desJson.clear();
+        Fjson.get(desJson, "humidity");
+        checkAndPrintJSONKeyValuePair("humidity", &desJson);
+        desJson.clear();
+        Fjson.get(desJson, "temperature");
+        checkAndPrintJSONKeyValuePair("temperature", &desJson);
+        desJson.clear();
+        Fjson.get(desJson, "wind_speed");
+        checkAndPrintJSONKeyValuePair("wind_speed", &desJson);
+        desJson.clear();
+        Fjson.get(desJson, "water_level");
+        checkAndPrintJSONKeyValuePair("water_level", &desJson);
+        desJson.clear();
+        Serial.println("--------------------");
 
-        count++;
+        // remove node_id from json object
+        Fjson.remove("node_id");
+
+        logToFirebase(node_id, &Fjson);
+        Fjson.clear();
     }
+}
+
+inline void checkAndPrintJSONKeyValuePair(String key, FirebaseJsonData* result) {
+    if (result->success) {
+        Serial.print(key);
+        Serial.print(": ");
+        if (result->typeNum == FirebaseJson::JSON_STRING)
+            Serial.println(result->to<String>().c_str());
+        else if (result->typeNum == FirebaseJson::JSON_INT)
+            Serial.println(result->to<int>());
+        else if (result->typeNum == FirebaseJson::JSON_FLOAT)
+            Serial.println(result->to<float>());
+        else if (result->typeNum == FirebaseJson::JSON_DOUBLE)
+            Serial.println(result->to<double>());
+        else if (result->typeNum == FirebaseJson::JSON_BOOL)
+            Serial.println(result->to<bool>());
+        else if (result->typeNum == FirebaseJson::JSON_OBJECT)
+            Serial.println(result->to<String>().c_str());
+        else if (result->typeNum == FirebaseJson::JSON_ARRAY)
+            Serial.println(result->to<String>().c_str());
+        else if (result->typeNum == FirebaseJson::JSON_NULL)
+            Serial.println(result->to<String>().c_str());
+
+        return;
+    }
+    Serial.println("JSON value to primitive conversion error");
 }
 
 void setup() {
     // initialize Serial Monitor
+    delay(3000);
     Serial.flush();
     Serial.begin(115200);
     Serial.println("Initializing...");
     delay(3000);
     configTime(0, 0, ntpServer);
 
-    Serial.println("================= LoRa Receiver =================");
-
-    // setup LoRa transceiver module
-    LoRa.setPins(ss, rst, dio0);
-
-    // replace the LoRa.begin(---E-) argument with your location's frequency
-    // 433E6 for Asia
-    // 866E6 for Europe
-    // 915E6 for North America
-    while (!LoRa.begin(915E6)) {
-        Serial.println(".");
-        delay(500);
-    }
-    // Change sync word (0xF3) to match the receiver
-    // The sync word assures you don't get LoRa messages from other LoRa transceivers
-    // ranges from 0-0xFF
-    LoRa.setSyncWord(0xF3);
-    Serial.println("LoRa Initializing OK!");
-
     Serial.println("================= Wifi =================");
     connectWifi();
 
     Serial.println("================= Firebase =================");
     initFirebase();
+
+    Serial.println("================= LoRa Receiver =================");
+    initLoRa();
 }
 
 void loop() {
-    // try to parse packet
-    int packetSize = LoRa.parsePacket();
-    if (packetSize) {
-        // received a packet
-        Serial.print("Received packet '");
-
-        // read packet
-        while (LoRa.available()) {
-            String LoRaData = LoRa.readString();
-            Serial.print(LoRaData);
-        }
-
-        // print RSSI of packet
-        Serial.print("' with RSSI ");
-        Serial.println(LoRa.packetRssi());
-    }
-
-    logToFirebase();
+    int packet_size = LoRa.parsePacket();
+    receiveLoRa(packet_size);
 }
